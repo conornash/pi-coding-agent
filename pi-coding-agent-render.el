@@ -1609,7 +1609,7 @@ PREVIEW-STATE and keep their compact streaming headers.
 Uses `font-lock-face' to survive tree-sitter refontification."
   (let ((path (pi-coding-agent--tool-path args)))
     (pcase tool-name
-      ("bash"
+      ((or "bash" "ysh")
        (let ((cmd (or (plist-get args :command) "...")))
          (concat (propertize "$" 'font-lock-face 'pi-coding-agent-tool-name)
                  (propertize (concat " " cmd) 'font-lock-face 'pi-coding-agent-tool-command))))
