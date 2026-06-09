@@ -6,11 +6,32 @@
 
 ;;; Code:
 
+(require 'dired)
 (require 'ert)
 (require 'pi-coding-agent)
 (require 'pi-coding-agent-test-common)
 
 ;;; Shared Test Helpers
+
+(defun pi-coding-agent-test--make-open-session-command-buffers (&optional process)
+  "Return linked chat/input/process fixtures for open-session-file tests.
+PROCESS defaults to a harmless pipe process because pi buffer cleanup expects
+`pi-coding-agent--process' to be either nil or a process object.  These tests
+still mock the RPC boundary, so the process is never used for I/O."
+  (let ((chat-buf (generate-new-buffer " *pi-coding-agent-open-session-chat*"))
+        (input-buf (generate-new-buffer " *pi-coding-agent-open-session-input*"))
+        (proc (or process
+                  (make-pipe-process :name "pi-coding-agent-open-session-test"
+                                     :buffer nil
+                                     :noquery t))))
+    (with-current-buffer chat-buf
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--set-input-buffer input-buf)
+      (pi-coding-agent--set-process proc))
+    (with-current-buffer input-buf
+      (pi-coding-agent-input-mode)
+      (pi-coding-agent--set-chat-buffer chat-buf))
+    (list chat-buf input-buf proc)))
 
 (ert-deftest pi-coding-agent-test-backend-spec-builds-fake-launch-config ()
   "Shared test helper builds fake backend launch data from a scenario name."
@@ -64,6 +85,643 @@
       (should (derived-mode-p 'pi-coding-agent-chat-mode)))
     (with-current-buffer "*pi-coding-agent-input:/tmp/pi-coding-agent-test-modes/*"
       (should (derived-mode-p 'pi-coding-agent-input-mode)))))
+
+(ert-deftest pi-coding-agent-test-open-session-file-validates-sets-up-displays-and-resumes ()
+  "Opening a valid session file uses the normal live-session path."
+  (let* ((project-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-open-project-"))
+         (session-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-open-sessions-"))
+         (session-file (expand-file-name "session.jsonl" session-dir))
+         (original-validator (symbol-function
+                              'pi-coding-agent--session-file-cwd-or-error))
+         (buffers (pi-coding-agent-test--make-open-session-command-buffers))
+         (chat-buf (car buffers))
+         (input-buf (cadr buffers))
+         (proc (caddr buffers))
+         (calls nil))
+    (unwind-protect
+        (progn
+          (pi-coding-agent-test--write-session-file
+           session-file "hello" (directory-file-name project-dir))
+          (cl-letf (((symbol-function 'pi-coding-agent--session-file-cwd-or-error)
+                     (lambda (path)
+                       (push (list 'validate path) calls)
+                       (funcall original-validator path)))
+                    ((symbol-function 'pi-coding-agent--check-dependencies)
+                     (lambda ()
+                       (push '(check-dependencies) calls)))
+                    ((symbol-function 'pi-coding-agent--setup-session)
+                     (lambda (dir &optional session)
+                       (push (list 'setup-session dir session) calls)
+                       chat-buf))
+                    ((symbol-function 'pi-coding-agent--display-buffers)
+                     (lambda (chat input)
+                       (push (list 'display chat input) calls)))
+                    ((symbol-function 'pi-coding-agent--session-transition-ready-p)
+                     (lambda (chat action)
+                       (push (list 'ready chat action) calls)
+                       t))
+                    ((symbol-function 'pi-coding-agent--resume-selected-session)
+                     (lambda (proc chat path)
+                       (push (list 'resume proc chat path) calls))))
+            (should (eq (pi-coding-agent-open-session-file session-file) chat-buf)))
+          (should (equal (nreverse calls)
+                         `((validate ,session-file)
+                           (check-dependencies)
+                           (setup-session ,project-dir nil)
+                           (display ,chat-buf ,input-buf)
+                           (ready ,chat-buf "open")
+                           (resume ,proc ,chat-buf ,session-file)))))
+      (pi-coding-agent-test--kill-live-buffers input-buf chat-buf)
+      (delete-directory project-dir t)
+      (delete-directory session-dir t))))
+
+(ert-deftest pi-coding-agent-test-open-session-file-skips-resume-when-not-ready ()
+  "Opening a valid session file displays the session but does not switch if busy."
+  (let* ((project-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-open-not-ready-project-"))
+         (session-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-open-not-ready-sessions-"))
+         (session-file (expand-file-name "session.jsonl" session-dir))
+         (buffers (pi-coding-agent-test--make-open-session-command-buffers))
+         (chat-buf (car buffers))
+         (input-buf (cadr buffers))
+         (displayed nil)
+         (resume-called nil))
+    (unwind-protect
+        (progn
+          (pi-coding-agent-test--write-session-file
+           session-file "hello" (directory-file-name project-dir))
+          (cl-letf (((symbol-function 'pi-coding-agent--check-dependencies)
+                     #'ignore)
+                    ((symbol-function 'pi-coding-agent--setup-session)
+                     (lambda (_dir &optional _session) chat-buf))
+                    ((symbol-function 'pi-coding-agent--display-buffers)
+                     (lambda (_chat _input) (setq displayed t)))
+                    ((symbol-function 'pi-coding-agent--session-transition-ready-p)
+                     (lambda (_chat _action) nil))
+                    ((symbol-function 'pi-coding-agent--resume-selected-session)
+                     (lambda (&rest _) (setq resume-called t))))
+            (should (eq (pi-coding-agent-open-session-file session-file) chat-buf)))
+          (should displayed)
+          (should-not resume-called))
+      (pi-coding-agent-test--kill-live-buffers input-buf chat-buf)
+      (delete-directory project-dir t)
+      (delete-directory session-dir t))))
+
+(ert-deftest pi-coding-agent-test-open-session-file-rejects-bad-cwd-before-setup ()
+  "Rejected session files do not start or display a pi session."
+  (let* ((session-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-open-reject-sessions-"))
+         (cases `(("missing-cwd" . ,(lambda (path)
+                                      (pi-coding-agent-test--write-session-file
+                                       path "hello")))
+                  ("relative-cwd" . ,(lambda (path)
+                                       (pi-coding-agent-test--write-session-file
+                                        path "hello" "relative-project")))
+                  ("stale-cwd" . ,(lambda (path)
+                                    (pi-coding-agent-test--write-session-file
+                                     path "hello"
+                                     (expand-file-name "deleted-project"
+                                                       session-dir)))))))
+    (unwind-protect
+        (dolist (case cases)
+          (let ((session-file (expand-file-name
+                               (format "%s.jsonl" (car case))
+                               session-dir)))
+            (funcall (cdr case) session-file)
+            (ert-info ((format "rejected case: %s" (car case)))
+              (cl-letf (((symbol-function 'pi-coding-agent--check-dependencies)
+                         (lambda ()
+                           (ert-fail "Dependencies checked before cwd validation")))
+                        ((symbol-function 'pi-coding-agent--setup-session)
+                         (lambda (&rest _)
+                           (ert-fail "Session setup ran for rejected file")))
+                        ((symbol-function 'pi-coding-agent--display-buffers)
+                         (lambda (&rest _)
+                           (ert-fail "Buffers displayed for rejected file")))
+                        ((symbol-function 'pi-coding-agent--resume-selected-session)
+                         (lambda (&rest _)
+                           (ert-fail "Resume ran for rejected file"))))
+                (should-error (pi-coding-agent-open-session-file session-file)
+                              :type 'user-error)))))
+      (delete-directory session-dir t))))
+
+(ert-deftest pi-coding-agent-test-open-session-file-interactive-defaults-to-dired-file ()
+  "Interactively opening from Dired defaults to the regular file at point."
+  (let* ((session-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-open-dired-sessions-"))
+         (project-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-open-dired-project-"))
+         (session-file (expand-file-name "session.jsonl" session-dir))
+         (buffers (pi-coding-agent-test--make-open-session-command-buffers))
+         (chat-buf (car buffers))
+         (input-buf (cadr buffers))
+         (read-args nil)
+         (dired-buf nil))
+    (unwind-protect
+        (progn
+          (pi-coding-agent-test--write-session-file
+           session-file "hello" (directory-file-name project-dir))
+          (setq dired-buf (dired-noselect session-dir))
+          (with-current-buffer dired-buf
+            (dired-goto-file session-file)
+            (cl-letf (((symbol-function 'read-file-name)
+                       (lambda (&rest args)
+                         (setq read-args args)
+                         (expand-file-name (or (nth 4 args) "")
+                                           (or (nth 1 args) default-directory))))
+                      ((symbol-function 'pi-coding-agent--check-dependencies)
+                       #'ignore)
+                      ((symbol-function 'pi-coding-agent--setup-session)
+                       (lambda (_dir &optional _session) chat-buf))
+                      ((symbol-function 'pi-coding-agent--display-buffers)
+                       #'ignore)
+                      ((symbol-function 'pi-coding-agent--session-transition-ready-p)
+                       (lambda (_chat _action) t))
+                      ((symbol-function 'pi-coding-agent--resume-selected-session)
+                       #'ignore))
+              (call-interactively #'pi-coding-agent-open-session-file)))
+          (should (equal (nth 0 read-args) "Pi session file: "))
+          (should (equal (nth 1 read-args) session-dir))
+          (should (equal (nth 2 read-args) session-file))
+          (should (eq (nth 3 read-args) t))
+          (should (equal (nth 4 read-args)
+                         (file-name-nondirectory session-file))))
+      (when dired-buf (kill-buffer dired-buf))
+      (pi-coding-agent-test--kill-live-buffers input-buf chat-buf)
+      (delete-directory project-dir t)
+      (delete-directory session-dir t))))
+
+(ert-deftest pi-coding-agent-test-open-session-file-interactive-defaults-to-visited-jsonl-file ()
+  "Interactively opening from a JSONL buffer defaults to its file."
+  (let* ((session-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-open-visited-sessions-"))
+         (project-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-open-visited-project-"))
+         (session-file (expand-file-name "session.jsonl" session-dir))
+         (buffers (pi-coding-agent-test--make-open-session-command-buffers))
+         (chat-buf (car buffers))
+         (input-buf (cadr buffers))
+         (read-args nil)
+         (file-buf nil))
+    (unwind-protect
+        (progn
+          (pi-coding-agent-test--write-session-file
+           session-file "hello" (directory-file-name project-dir))
+          (setq file-buf (find-file-noselect session-file))
+          (with-current-buffer file-buf
+            (cl-letf (((symbol-function 'read-file-name)
+                       (lambda (&rest args)
+                         (setq read-args args)
+                         (expand-file-name (or (nth 4 args) "")
+                                           (or (nth 1 args) default-directory))))
+                      ((symbol-function 'pi-coding-agent--check-dependencies)
+                       #'ignore)
+                      ((symbol-function 'pi-coding-agent--setup-session)
+                       (lambda (_dir &optional _session) chat-buf))
+                      ((symbol-function 'pi-coding-agent--display-buffers)
+                       #'ignore)
+                      ((symbol-function 'pi-coding-agent--session-transition-ready-p)
+                       (lambda (_chat _action) t))
+                      ((symbol-function 'pi-coding-agent--resume-selected-session)
+                       #'ignore))
+              (call-interactively #'pi-coding-agent-open-session-file)))
+          (should (equal (nth 0 read-args) "Pi session file: "))
+          (should (equal (nth 1 read-args) session-dir))
+          (should (equal (nth 2 read-args) session-file))
+          (should (eq (nth 3 read-args) t))
+          (should (equal (nth 4 read-args)
+                         (file-name-nondirectory session-file))))
+      (when file-buf (kill-buffer file-buf))
+      (pi-coding-agent-test--kill-live-buffers input-buf chat-buf)
+      (delete-directory project-dir t)
+      (delete-directory session-dir t))))
+
+(ert-deftest pi-coding-agent-test-open-session-file-rejects-invalid-visited-jsonl-before-setup ()
+  "A visited invalid JSONL default is rejected before session setup."
+  (let* ((session-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-open-invalid-visited-sessions-"))
+         (session-file (expand-file-name "invalid.jsonl" session-dir))
+         (read-args nil)
+         (file-buf nil))
+    (unwind-protect
+        (progn
+          (pi-coding-agent-test--write-session-file session-file "hello")
+          (setq file-buf (find-file-noselect session-file))
+          (with-current-buffer file-buf
+            (cl-letf (((symbol-function 'read-file-name)
+                       (lambda (&rest args)
+                         (setq read-args args)
+                         (expand-file-name (or (nth 4 args) "")
+                                           (or (nth 1 args) default-directory))))
+                      ((symbol-function 'pi-coding-agent--check-dependencies)
+                       (lambda ()
+                         (ert-fail "Dependencies checked before cwd validation")))
+                      ((symbol-function 'pi-coding-agent--setup-session)
+                       (lambda (&rest _)
+                         (ert-fail "Session setup ran for rejected file")))
+                      ((symbol-function 'pi-coding-agent--display-buffers)
+                       (lambda (&rest _)
+                         (ert-fail "Buffers displayed for rejected file")))
+                      ((symbol-function 'pi-coding-agent--resume-selected-session)
+                       (lambda (&rest _)
+                         (ert-fail "Resume ran for rejected file"))))
+              (should-error (call-interactively #'pi-coding-agent-open-session-file)
+                            :type 'user-error)))
+          (should (equal (nth 0 read-args) "Pi session file: "))
+          (should (equal (nth 1 read-args) session-dir))
+          (should (equal (nth 2 read-args) session-file))
+          (should (eq (nth 3 read-args) t))
+          (should (equal (nth 4 read-args)
+                         (file-name-nondirectory session-file))))
+      (when file-buf (kill-buffer file-buf))
+      (delete-directory session-dir t))))
+
+(ert-deftest pi-coding-agent-test-open-session-file-dired-default-wins-over-visited-jsonl-file ()
+  "Dired's regular file at point has priority over `buffer-file-name'."
+  (let* ((session-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-open-dired-priority-sessions-"))
+         (project-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-open-dired-priority-project-"))
+         (dired-file (expand-file-name "dired.jsonl" session-dir))
+         (visited-file (expand-file-name "visited.jsonl" session-dir))
+         (buffers (pi-coding-agent-test--make-open-session-command-buffers))
+         (chat-buf (car buffers))
+         (input-buf (cadr buffers))
+         (read-args nil)
+         (dired-buf nil))
+    (unwind-protect
+        (progn
+          (pi-coding-agent-test--write-session-file
+           dired-file "dired" (directory-file-name project-dir))
+          (pi-coding-agent-test--write-session-file
+           visited-file "visited" (directory-file-name project-dir))
+          (setq dired-buf (dired-noselect session-dir))
+          (with-current-buffer dired-buf
+            (setq-local buffer-file-name visited-file)
+            (dired-goto-file dired-file)
+            (cl-letf (((symbol-function 'read-file-name)
+                       (lambda (&rest args)
+                         (setq read-args args)
+                         (expand-file-name (or (nth 4 args) "")
+                                           (or (nth 1 args) default-directory))))
+                      ((symbol-function 'pi-coding-agent--check-dependencies)
+                       #'ignore)
+                      ((symbol-function 'pi-coding-agent--setup-session)
+                       (lambda (_dir &optional _session) chat-buf))
+                      ((symbol-function 'pi-coding-agent--display-buffers)
+                       #'ignore)
+                      ((symbol-function 'pi-coding-agent--session-transition-ready-p)
+                       (lambda (_chat _action) t))
+                      ((symbol-function 'pi-coding-agent--resume-selected-session)
+                       #'ignore))
+              (call-interactively #'pi-coding-agent-open-session-file)))
+          (should (equal (nth 0 read-args) "Pi session file: "))
+          (should (equal (nth 1 read-args) session-dir))
+          (should (equal (nth 2 read-args) dired-file))
+          (should (eq (nth 3 read-args) t))
+          (should (equal (nth 4 read-args)
+                         (file-name-nondirectory dired-file))))
+      (when dired-buf (kill-buffer dired-buf))
+      (pi-coding-agent-test--kill-live-buffers input-buf chat-buf)
+      (delete-directory project-dir t)
+      (delete-directory session-dir t))))
+
+(ert-deftest pi-coding-agent-test-open-session-file-visited-non-jsonl-has-no-file-default ()
+  "Visited non-JSONL buffers do not become session-file defaults."
+  (let* ((session-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-open-non-jsonl-sessions-"))
+         (project-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-open-non-jsonl-project-"))
+         (text-file (expand-file-name "notes.txt" session-dir))
+         (chosen-file (expand-file-name "chosen.jsonl" session-dir))
+         (buffers (pi-coding-agent-test--make-open-session-command-buffers))
+         (chat-buf (car buffers))
+         (input-buf (cadr buffers))
+         (read-args nil)
+         (read-buffer-file-name nil)
+         (file-buf nil))
+    (unwind-protect
+        (progn
+          (with-temp-file text-file (insert "not a session\n"))
+          (pi-coding-agent-test--write-session-file
+           chosen-file "chosen" (directory-file-name project-dir))
+          (setq file-buf (find-file-noselect text-file))
+          (with-current-buffer file-buf
+            (cl-letf (((symbol-function 'read-file-name)
+                       (lambda (&rest args)
+                         (setq read-args args
+                               read-buffer-file-name buffer-file-name)
+                         chosen-file))
+                      ((symbol-function 'pi-coding-agent--check-dependencies)
+                       #'ignore)
+                      ((symbol-function 'pi-coding-agent--setup-session)
+                       (lambda (_dir &optional _session) chat-buf))
+                      ((symbol-function 'pi-coding-agent--display-buffers)
+                       #'ignore)
+                      ((symbol-function 'pi-coding-agent--session-transition-ready-p)
+                       (lambda (_chat _action) t))
+                      ((symbol-function 'pi-coding-agent--resume-selected-session)
+                       #'ignore))
+              (call-interactively #'pi-coding-agent-open-session-file)))
+          (should (equal (nth 0 read-args) "Pi session file: "))
+          (should-not (nth 1 read-args))
+          (should-not (nth 2 read-args))
+          (should (eq (nth 3 read-args) t))
+          (should-not (nth 4 read-args))
+          (should-not read-buffer-file-name))
+      (when file-buf (kill-buffer file-buf))
+      (pi-coding-agent-test--kill-live-buffers input-buf chat-buf)
+      (delete-directory project-dir t)
+      (delete-directory session-dir t))))
+
+(ert-deftest pi-coding-agent-test-open-session-file-jsonl-probe-errors-have-no-file-default ()
+  "Errors while probing a visited .jsonl file do not abort the prompt."
+  (let* ((session-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-open-probe-error-sessions-"))
+         (project-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-open-probe-error-project-"))
+         (probed-file (expand-file-name "probed.jsonl" session-dir))
+         (chosen-file (expand-file-name "chosen.jsonl" session-dir))
+         (original-file-regular-p (symbol-function 'file-regular-p))
+         (buffers (pi-coding-agent-test--make-open-session-command-buffers))
+         (chat-buf (car buffers))
+         (input-buf (cadr buffers))
+         (read-args nil)
+         (read-buffer-file-name nil)
+         (file-buf nil))
+    (unwind-protect
+        (progn
+          (with-temp-file probed-file (insert "not important\n"))
+          (pi-coding-agent-test--write-session-file
+           chosen-file "chosen" (directory-file-name project-dir))
+          (setq file-buf (find-file-noselect probed-file))
+          (with-current-buffer file-buf
+            (cl-letf (((symbol-function 'file-regular-p)
+                       (lambda (path)
+                         (if (equal (expand-file-name path) probed-file)
+                             (error "probe failed")
+                           (funcall original-file-regular-p path))))
+                      ((symbol-function 'read-file-name)
+                       (lambda (&rest args)
+                         (setq read-args args
+                               read-buffer-file-name buffer-file-name)
+                         chosen-file))
+                      ((symbol-function 'pi-coding-agent--check-dependencies)
+                       #'ignore)
+                      ((symbol-function 'pi-coding-agent--setup-session)
+                       (lambda (_dir &optional _session) chat-buf))
+                      ((symbol-function 'pi-coding-agent--display-buffers)
+                       #'ignore)
+                      ((symbol-function 'pi-coding-agent--session-transition-ready-p)
+                       (lambda (_chat _action) t))
+                      ((symbol-function 'pi-coding-agent--resume-selected-session)
+                       #'ignore))
+              (call-interactively #'pi-coding-agent-open-session-file)))
+          (should (equal (nth 0 read-args) "Pi session file: "))
+          (should-not (nth 1 read-args))
+          (should-not (nth 2 read-args))
+          (should (eq (nth 3 read-args) t))
+          (should-not (nth 4 read-args))
+          (should-not read-buffer-file-name))
+      (when file-buf (kill-buffer file-buf))
+      (pi-coding-agent-test--kill-live-buffers input-buf chat-buf)
+      (delete-directory project-dir t)
+      (delete-directory session-dir t))))
+
+(ert-deftest pi-coding-agent-test-open-session-file-unreadable-jsonl-has-no-file-default ()
+  "An unreadable .jsonl file is not used as a session-file default."
+  (let* ((session-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-open-unreadable-sessions-"))
+         (project-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-open-unreadable-project-"))
+         (unreadable-file (expand-file-name "unreadable.jsonl" session-dir))
+         (chosen-file (expand-file-name "chosen.jsonl" session-dir))
+         (original-file-readable-p (symbol-function 'file-readable-p))
+         (buffers (pi-coding-agent-test--make-open-session-command-buffers))
+         (chat-buf (car buffers))
+         (input-buf (cadr buffers))
+         (read-args nil)
+         (read-buffer-file-name nil)
+         (file-buf nil))
+    (unwind-protect
+        (progn
+          (with-temp-file unreadable-file (insert "not important\n"))
+          (pi-coding-agent-test--write-session-file
+           chosen-file "chosen" (directory-file-name project-dir))
+          (setq file-buf (find-file-noselect unreadable-file))
+          (with-current-buffer file-buf
+            (cl-letf (((symbol-function 'file-readable-p)
+                       (lambda (path)
+                         (and (not (equal (expand-file-name path)
+                                          unreadable-file))
+                              (funcall original-file-readable-p path))))
+                      ((symbol-function 'read-file-name)
+                       (lambda (&rest args)
+                         (setq read-args args
+                               read-buffer-file-name buffer-file-name)
+                         chosen-file))
+                      ((symbol-function 'pi-coding-agent--check-dependencies)
+                       #'ignore)
+                      ((symbol-function 'pi-coding-agent--setup-session)
+                       (lambda (_dir &optional _session) chat-buf))
+                      ((symbol-function 'pi-coding-agent--display-buffers)
+                       #'ignore)
+                      ((symbol-function 'pi-coding-agent--session-transition-ready-p)
+                       (lambda (_chat _action) t))
+                      ((symbol-function 'pi-coding-agent--resume-selected-session)
+                       #'ignore))
+              (call-interactively #'pi-coding-agent-open-session-file)))
+          (should (equal (nth 0 read-args) "Pi session file: "))
+          (should-not (nth 1 read-args))
+          (should-not (nth 2 read-args))
+          (should (eq (nth 3 read-args) t))
+          (should-not (nth 4 read-args))
+          (should-not read-buffer-file-name))
+      (when file-buf (kill-buffer file-buf))
+      (pi-coding-agent-test--kill-live-buffers input-buf chat-buf)
+      (delete-directory project-dir t)
+      (delete-directory session-dir t))))
+
+(ert-deftest pi-coding-agent-test-open-session-file-non-regular-jsonl-has-no-file-default ()
+  "A non-regular .jsonl path is not used as a session-file default."
+  (let* ((session-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-open-non-regular-sessions-"))
+         (project-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-open-non-regular-project-"))
+         (jsonl-dir (expand-file-name "directory.jsonl" session-dir))
+         (chosen-file (expand-file-name "chosen.jsonl" session-dir))
+         (buffers (pi-coding-agent-test--make-open-session-command-buffers))
+         (chat-buf (car buffers))
+         (input-buf (cadr buffers))
+         (read-args nil)
+         (read-buffer-file-name nil)
+         (file-buf nil))
+    (unwind-protect
+        (progn
+          (make-directory jsonl-dir)
+          (pi-coding-agent-test--write-session-file
+           chosen-file "chosen" (directory-file-name project-dir))
+          (setq file-buf (generate-new-buffer " *pi-coding-agent-jsonl-dir*"))
+          (with-current-buffer file-buf
+            (setq buffer-file-name jsonl-dir)
+            (setq default-directory session-dir)
+            (cl-letf (((symbol-function 'read-file-name)
+                       (lambda (&rest args)
+                         (setq read-args args
+                               read-buffer-file-name buffer-file-name)
+                         chosen-file))
+                      ((symbol-function 'pi-coding-agent--check-dependencies)
+                       #'ignore)
+                      ((symbol-function 'pi-coding-agent--setup-session)
+                       (lambda (_dir &optional _session) chat-buf))
+                      ((symbol-function 'pi-coding-agent--display-buffers)
+                       #'ignore)
+                      ((symbol-function 'pi-coding-agent--session-transition-ready-p)
+                       (lambda (_chat _action) t))
+                      ((symbol-function 'pi-coding-agent--resume-selected-session)
+                       #'ignore))
+              (call-interactively #'pi-coding-agent-open-session-file)))
+          (should (equal (nth 0 read-args) "Pi session file: "))
+          (should-not (nth 1 read-args))
+          (should-not (nth 2 read-args))
+          (should (eq (nth 3 read-args) t))
+          (should-not (nth 4 read-args))
+          (should-not read-buffer-file-name))
+      (when file-buf (kill-buffer file-buf))
+      (pi-coding-agent-test--kill-live-buffers input-buf chat-buf)
+      (delete-directory project-dir t)
+      (delete-directory session-dir t))))
+
+(ert-deftest pi-coding-agent-test-open-session-file-dired-directory-has-no-file-default ()
+  "Interactively opening from Dired does not default to a directory at point."
+  (let* ((session-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-open-dired-dir-sessions-"))
+         (project-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-open-dired-dir-project-"))
+         (subdir (expand-file-name "subdir" session-dir))
+         (visited-file (expand-file-name "visited.jsonl" session-dir))
+         (chosen-file (expand-file-name "chosen.jsonl" session-dir))
+         (buffers (pi-coding-agent-test--make-open-session-command-buffers))
+         (chat-buf (car buffers))
+         (input-buf (cadr buffers))
+         (read-args nil)
+         (read-buffer-file-name nil)
+         (dired-buf nil))
+    (unwind-protect
+        (progn
+          (make-directory subdir)
+          (with-temp-file chosen-file (insert "{}\n"))
+          (with-temp-file visited-file (insert "{}\n"))
+          (setq dired-buf (dired-noselect session-dir))
+          (with-current-buffer dired-buf
+            (setq-local buffer-file-name visited-file)
+            (dired-goto-file subdir)
+            (cl-letf (((symbol-function 'read-file-name)
+                       (lambda (&rest args)
+                         (setq read-args args
+                               read-buffer-file-name buffer-file-name)
+                         chosen-file))
+                      ((symbol-function 'pi-coding-agent--session-file-cwd-or-error)
+                       (lambda (_path) project-dir))
+                      ((symbol-function 'pi-coding-agent--check-dependencies)
+                       #'ignore)
+                      ((symbol-function 'pi-coding-agent--setup-session)
+                       (lambda (_dir &optional _session) chat-buf))
+                      ((symbol-function 'pi-coding-agent--display-buffers)
+                       #'ignore)
+                      ((symbol-function 'pi-coding-agent--session-transition-ready-p)
+                       (lambda (_chat _action) t))
+                      ((symbol-function 'pi-coding-agent--resume-selected-session)
+                       #'ignore))
+              (call-interactively #'pi-coding-agent-open-session-file)))
+          (should (equal (nth 0 read-args) "Pi session file: "))
+          (should-not (nth 1 read-args))
+          (should-not (nth 2 read-args))
+          (should (eq (nth 3 read-args) t))
+          (should-not (nth 4 read-args))
+          (should-not read-buffer-file-name))
+      (when dired-buf (kill-buffer dired-buf))
+      (pi-coding-agent-test--kill-live-buffers input-buf chat-buf)
+      (delete-directory project-dir t)
+      (delete-directory session-dir t))))
+
+(ert-deftest pi-coding-agent-test-open-session-file-does-not-change-dired-pi-coding-agent ()
+  "Plain `pi-coding-agent' stays directory-oriented when called from Dired."
+  (let* ((session-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-open-plain-dired-"))
+         (session-file (expand-file-name "session.jsonl" session-dir))
+         (buffers (pi-coding-agent-test--make-open-session-command-buffers))
+         (chat-buf (car buffers))
+         (input-buf (cadr buffers))
+         (setup-dir nil)
+         (dired-buf nil))
+    (unwind-protect
+        (progn
+          (with-temp-file session-file (insert "{}\n"))
+          (setq dired-buf (dired-noselect session-dir))
+          (with-current-buffer dired-buf
+            (dired-goto-file session-file)
+            (cl-letf (((symbol-function 'dired-get-filename)
+                       (lambda (&rest _)
+                         (ert-fail "pi-coding-agent inspected Dired point")))
+                      ((symbol-function 'project-current)
+                       (lambda (&rest _) nil))
+                      ((symbol-function 'pi-coding-agent--check-dependencies)
+                       #'ignore)
+                      ((symbol-function 'pi-coding-agent--setup-session)
+                       (lambda (dir &optional _session)
+                         (setq setup-dir dir)
+                         chat-buf))
+                      ((symbol-function 'pi-coding-agent--display-buffers)
+                       #'ignore))
+              (pi-coding-agent)))
+          (should (equal setup-dir session-dir)))
+      (when dired-buf (kill-buffer dired-buf))
+      (pi-coding-agent-test--kill-live-buffers input-buf chat-buf)
+      (delete-directory session-dir t))))
+
+(ert-deftest pi-coding-agent-test-open-session-file-does-not-change-visited-jsonl-pi-coding-agent ()
+  "Plain `pi-coding-agent' stays directory-oriented in a JSONL buffer."
+  (let* ((session-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-open-plain-jsonl-"))
+         (session-file (expand-file-name "session.jsonl" session-dir))
+         (buffers (pi-coding-agent-test--make-open-session-command-buffers))
+         (chat-buf (car buffers))
+         (input-buf (cadr buffers))
+         (setup-dir nil)
+         (file-buf nil))
+    (unwind-protect
+        (progn
+          (with-temp-file session-file (insert "{}\n"))
+          (setq file-buf (find-file-noselect session-file))
+          (with-current-buffer file-buf
+            (cl-letf (((symbol-function 'pi-coding-agent--read-session-file-name)
+                       (lambda ()
+                         (ert-fail "pi-coding-agent read a session file")))
+                      ((symbol-function 'pi-coding-agent--session-file-cwd-or-error)
+                       (lambda (&rest _)
+                         (ert-fail "pi-coding-agent validated a session file")))
+                      ((symbol-function 'pi-coding-agent--resume-selected-session)
+                       (lambda (&rest _)
+                         (ert-fail "pi-coding-agent resumed a session file")))
+                      ((symbol-function 'project-current)
+                       (lambda (&rest _) nil))
+                      ((symbol-function 'pi-coding-agent--check-dependencies)
+                       #'ignore)
+                      ((symbol-function 'pi-coding-agent--setup-session)
+                       (lambda (dir &optional _session)
+                         (setq setup-dir dir)
+                         chat-buf))
+                      ((symbol-function 'pi-coding-agent--display-buffers)
+                       #'ignore))
+              (pi-coding-agent)))
+          (should (equal setup-dir session-dir)))
+      (when file-buf (kill-buffer file-buf))
+      (pi-coding-agent-test--kill-live-buffers input-buf chat-buf)
+      (delete-directory session-dir t))))
 
 ;;; DWIM & Toggle
 

@@ -1273,15 +1273,104 @@ replaced by the resumed or forked history."
                            (overlay-get ov 'pi-coding-agent-tool-block))
                          (overlays-in (point-min) (point-max))))))
 
-(defun pi-coding-agent-test--write-session-file (path &optional text)
-  "Write a minimal pi session file to PATH with optional first message TEXT."
-  (with-temp-file path
-    (insert (json-encode '(:type "session" :id "test")) "\n")
-    (when text
-      (insert (json-encode `(:type "message"
-                             :message (:role "user"
-                                       :content [(:type "text" :text ,text)])))
-              "\n"))))
+(ert-deftest pi-coding-agent-test-session-file-cwd-or-error-returns-expanded-directory ()
+  "Session-file cwd validator returns an expanded directory name."
+  (let* ((project-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-project-"))
+         (session-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-sessions-"))
+         (session-file (expand-file-name "session.jsonl" session-dir)))
+    (unwind-protect
+        (let ((cwd (directory-file-name project-dir)))
+          (pi-coding-agent-test--write-session-file session-file "hello" cwd)
+          (should (equal (pi-coding-agent--session-file-cwd-or-error
+                          session-file)
+                         project-dir)))
+      (delete-directory project-dir t)
+      (delete-directory session-dir t))))
+
+(ert-deftest pi-coding-agent-test-session-file-cwd-or-error-rejects-unreadable-file ()
+  "Session-file cwd validator rejects unreadable files."
+  (let* ((session-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-sessions-"))
+         (missing-file (expand-file-name "missing.jsonl" session-dir)))
+    (unwind-protect
+        (should-error (pi-coding-agent--session-file-cwd-or-error missing-file)
+                      :type 'user-error)
+      (delete-directory session-dir t))))
+
+(ert-deftest pi-coding-agent-test-session-file-cwd-or-error-rejects-invalid-session-metadata ()
+  "Session-file cwd validator rejects files without valid session metadata."
+  (let* ((session-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-sessions-"))
+         (session-file (expand-file-name "not-a-session.jsonl" session-dir)))
+    (unwind-protect
+        (progn
+          (with-temp-file session-file
+            (insert "{\"type\":\"message\"}\n"))
+          (should-error (pi-coding-agent--session-file-cwd-or-error session-file)
+                        :type 'user-error))
+      (delete-directory session-dir t))))
+
+(ert-deftest pi-coding-agent-test-session-file-cwd-or-error-rejects-unusable-cwd ()
+  "Session-file cwd validator rejects missing, non-string, and empty cwd values."
+  (let* ((session-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-sessions-"))
+         (cases '(("missing" . "{\"type\":\"session\",\"id\":\"test\"}")
+                  ("null" . "{\"type\":\"session\",\"id\":\"test\",\"cwd\":null}")
+                  ("number" . "{\"type\":\"session\",\"id\":\"test\",\"cwd\":123}")
+                  ("empty" . "{\"type\":\"session\",\"id\":\"test\",\"cwd\":\"\"}"))))
+    (unwind-protect
+        (dolist (case cases)
+          (let ((session-file (expand-file-name
+                               (format "%s.jsonl" (car case))
+                               session-dir)))
+            (with-temp-file session-file
+              (insert (cdr case) "\n"))
+            (ert-info ((format "cwd case: %s" (car case)))
+              (should-error (pi-coding-agent--session-file-cwd-or-error
+                             session-file)
+                            :type 'user-error))))
+      (delete-directory session-dir t))))
+
+(ert-deftest pi-coding-agent-test-session-file-cwd-or-error-rejects-relative-cwd ()
+  "Session-file cwd validator rejects cwd values that depend on default-directory."
+  (let* ((session-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-sessions-"))
+         (session-file (expand-file-name "relative.jsonl" session-dir))
+         (relative-cwd "relative-project"))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name relative-cwd session-dir))
+          (pi-coding-agent-test--write-session-file
+           session-file "hello" relative-cwd)
+          (let* ((default-directory session-dir)
+                 (error-data
+                  (should-error (pi-coding-agent--session-file-cwd-or-error
+                                 session-file)
+                                :type 'user-error))
+                 (message (cadr error-data)))
+            (should (string-match-p (regexp-quote relative-cwd) message))
+            (should (string-match-p (regexp-quote session-file) message))))
+      (delete-directory session-dir t))))
+
+(ert-deftest pi-coding-agent-test-session-file-cwd-or-error-rejects-stale-cwd ()
+  "Session-file cwd validator rejects cwd values that do not name a directory."
+  (let* ((session-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-sessions-"))
+         (session-file (expand-file-name "stale.jsonl" session-dir))
+         (stale-cwd (expand-file-name "deleted-project" session-dir)))
+    (unwind-protect
+        (progn
+          (pi-coding-agent-test--write-session-file session-file "hello" stale-cwd)
+          (let* ((error-data
+                  (should-error (pi-coding-agent--session-file-cwd-or-error
+                                 session-file)
+                                :type 'user-error))
+                 (message (cadr error-data)))
+            (should (string-match-p (regexp-quote stale-cwd) message))
+            (should (string-match-p (regexp-quote session-file) message))))
+      (delete-directory session-dir t))))
 
 (ert-deftest pi-coding-agent-test-session-list-directory-uses-session-file-parent ()
   "Session listing uses the current JSONL session file parent directory."

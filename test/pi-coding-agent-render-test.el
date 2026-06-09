@@ -6110,7 +6110,7 @@ events where the header text hasn't changed."
   "Dispatching /name without arg calls handler interactively."
   (let (interactive-called)
     (cl-letf (((symbol-function 'call-interactively)
-               (lambda (fn) (setq interactive-called fn))))
+               (lambda (fn &rest _args) (setq interactive-called fn))))
       (should (pi-coding-agent--dispatch-builtin-command "/name"))
       (should (eq interactive-called 'pi-coding-agent-set-session-name)))))
 
