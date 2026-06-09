@@ -10,6 +10,7 @@
 
 (require 'cl-lib) ; for cl-letf in mock-session macro
 (require 'ert)
+(require 'json)
 
 ;;; Timeout Configuration
 
@@ -270,6 +271,20 @@ Automatically cleans up chat and input buffers."
 PREFIX is forwarded to `make-temp-file'.  The returned path always has a
 trailing slash so it behaves like `default-directory'."
   (file-name-as-directory (make-temp-file prefix t)))
+
+(defun pi-coding-agent-test--write-session-file (path &optional text cwd)
+  "Write a minimal pi session file to PATH.
+When TEXT is non-nil, include it as the first user message.  When CWD is
+non-nil, include it in the session header."
+  (with-temp-file path
+    (insert (json-encode `(:type "session" :id "test"
+                           ,@(when cwd (list :cwd cwd))))
+            "\n")
+    (when text
+      (insert (json-encode `(:type "message"
+                             :message (:role "user"
+                                       :content [(:type "text" :text ,text)])))
+              "\n"))))
 
 (defun pi-coding-agent-test--write-chat-buffer (chat prefix &optional appended-text)
   "Save CHAT to a temp markdown file and return the file name.

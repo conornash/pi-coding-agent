@@ -222,9 +222,9 @@ When cached state has no session file, fetch fresh state from PROC first."
 
 (defun pi-coding-agent--session-metadata (path)
   "Extract metadata from session file PATH.
-Returns plist with :modified-time, :first-message, :message-count, and
-:session-name, or nil on error.  Session name comes from the most recent
-session_info entry if present."
+Returns plist with :modified-time, :first-message, :message-count,
+:session-name, and :cwd, or nil on error.  Session name comes from the
+most recent session_info entry if present."
   (condition-case nil
       (let* ((attrs (file-attributes path))
              (modified-time (file-attribute-modification-time attrs)))
@@ -233,9 +233,10 @@ session_info entry if present."
           (let ((first-message nil)
                 (message-count 0)
                 (session-name nil)
+                (session-cwd nil)
                 (has-session-header nil))
             (goto-char (point-min))
-            ;; Scan lines to find session header, first message, count messages, and session name
+            ;; Scan lines to find session header cwd, first message, count, and session name
             (while (not (eobp))
               (let* ((line (buffer-substring-no-properties
                             (point) (line-end-position))))
@@ -243,7 +244,10 @@ session_info entry if present."
                   (let* ((data (json-parse-string line :object-type 'plist))
                          (type (plist-get data :type)))
                     (when (equal type "session")
-                      (setq has-session-header t))
+                      (setq has-session-header t
+                            session-cwd
+                            (pi-coding-agent--normalize-string-or-null
+                             (plist-get data :cwd))))
                     (when (equal type "message")
                       (setq message-count (1+ message-count))
                       ;; Extract text from first message only
@@ -263,8 +267,32 @@ session_info entry if present."
               (list :modified-time modified-time
                     :first-message first-message
                     :message-count message-count
-                    :session-name session-name)))))
+                    :session-name session-name
+                    :cwd session-cwd)))))
     (error nil)))
+
+(defun pi-coding-agent--session-file-cwd-or-error (path)
+  "Return the recorded cwd from session file PATH, or signal `user-error'.
+The returned directory is expanded and has a trailing slash.  PATH must be a
+readable pi session file whose session header contains a non-empty absolute cwd
+that names an existing directory."
+  (let ((session-file (expand-file-name path)))
+    (unless (file-readable-p session-file)
+      (user-error "Session file is not readable: %s" session-file))
+    (let ((metadata (pi-coding-agent--session-metadata session-file)))
+      (unless metadata
+        (user-error "Not a pi session file: %s" session-file))
+      (let ((cwd (plist-get metadata :cwd)))
+        (unless (and (stringp cwd) (not (string-empty-p cwd)))
+          (user-error "Session file has no usable cwd: %s" session-file))
+        (unless (file-name-absolute-p cwd)
+          (user-error "Session file cwd is not absolute: %s\nSession file: %s"
+                      cwd session-file))
+        (let ((expanded-cwd (file-name-as-directory (expand-file-name cwd))))
+          (unless (file-directory-p expanded-cwd)
+            (user-error "Stored session cwd is not an existing directory: %s\nSession file: %s"
+                        expanded-cwd session-file))
+          expanded-cwd)))))
 
 (defun pi-coding-agent--update-session-name-from-file (session-file)
   "Update `pi-coding-agent--session-name' from SESSION-FILE metadata.

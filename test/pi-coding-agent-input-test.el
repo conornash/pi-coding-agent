@@ -2137,6 +2137,28 @@ This ensures history loads correctly when callback runs in arbitrary context."
             (should (equal (plist-get metadata :message-count) 2))))
       (delete-file temp-file))))
 
+(ert-deftest pi-coding-agent-test-session-metadata-extracts-cwd ()
+  "pi-coding-agent--session-metadata extracts cwd from the session header."
+  (let ((temp-file (make-temp-file "pi-coding-agent-test-session" nil ".jsonl"))
+        (project-dir (pi-coding-agent-test--make-temp-directory
+                      "pi-coding-agent-test-project-")))
+    (unwind-protect
+        (let ((cwd (directory-file-name project-dir)))
+          (with-temp-file temp-file
+            (insert (json-encode `(:type "session" :id "test" :cwd ,cwd)) "\n")
+            (insert (json-encode '(:type "message"
+                                   :message (:role "user"
+                                             :content [(:type "text"
+                                                       :text "Hello")]))))
+            (insert "\n"))
+          (let ((metadata (pi-coding-agent--session-metadata temp-file)))
+            (should metadata)
+            (should (equal (plist-get metadata :cwd) cwd))
+            (should (equal (plist-get metadata :first-message) "Hello"))
+            (should (equal (plist-get metadata :message-count) 1))))
+      (delete-file temp-file)
+      (delete-directory project-dir t))))
+
 (ert-deftest pi-coding-agent-test-session-metadata-returns-nil-for-empty-file ()
   "pi-coding-agent--session-metadata returns nil for empty or invalid files."
   (let ((temp-file (make-temp-file "pi-coding-agent-test-session" nil ".jsonl")))

@@ -41,9 +41,10 @@
 ;; loading it does not change global Markdown file associations.
 ;;
 ;; Usage:
-;;   M-x pi-coding-agent         Start or focus session in current project
-;;   C-u M-x pi-coding-agent     Start a named session
-;;   M-x pi-coding-agent-toggle  Hide/show session windows in current frame
+;;   M-x pi-coding-agent                    Start or focus session in current project
+;;   C-u M-x pi-coding-agent                Start a named session
+;;   M-x pi-coding-agent-open-session-file  Open a JSONL session file as live session
+;;   M-x pi-coding-agent-toggle             Hide/show session windows in current frame
 ;;
 ;; Many users define an alias: (defalias 'pi 'pi-coding-agent)
 ;;
@@ -82,6 +83,8 @@
 
 (require 'pi-coding-agent-menu)
 (require 'pi-coding-agent-input)
+
+(declare-function dired-get-filename "dired" (&optional localp no-error-if-not-filep))
 
 ;;;; Main Entry Point
 
@@ -138,6 +141,57 @@ Returns the chat buffer."
       (pi-coding-agent--set-chat-buffer chat-buf))
     chat-buf))
 
+(defun pi-coding-agent--show-session-buffers (chat-buf input-buf)
+  "Show CHAT-BUF and INPUT-BUF, focusing input when both are visible."
+  (if (and (get-buffer-window-list chat-buf nil)
+           (get-buffer-window-list input-buf nil))
+      (pi-coding-agent--focus-input-window chat-buf input-buf)
+    (pi-coding-agent--display-buffers chat-buf input-buf)))
+
+(defun pi-coding-agent--dired-regular-file-at-point ()
+  "Return Dired's regular file at point, or nil."
+  (when (derived-mode-p 'dired-mode)
+    (when-let* ((file (dired-get-filename nil t)))
+      (and (file-regular-p file)
+           (expand-file-name file)))))
+
+(defun pi-coding-agent--regular-jsonl-file-p (file)
+  "Return non-nil if FILE is a cheap local JSONL file candidate."
+  (when (stringp file)
+    (let ((path (expand-file-name file)))
+      (and (string-suffix-p ".jsonl" path)
+           (not (file-remote-p path))
+           (ignore-errors
+             (and (file-regular-p path)
+                  (file-readable-p path)))))))
+
+(defun pi-coding-agent--visited-jsonl-file-prompt-default ()
+  "Return the current buffer's visited JSONL file for the prompt, or nil."
+  (when-let* ((file buffer-file-name)
+              (path (expand-file-name file)))
+    (and (pi-coding-agent--regular-jsonl-file-p path)
+         path)))
+
+(defun pi-coding-agent--session-file-prompt-default ()
+  "Return an explicit default file for the session-file prompt, or nil."
+  (if (derived-mode-p 'dired-mode)
+      (pi-coding-agent--dired-regular-file-at-point)
+    (pi-coding-agent--visited-jsonl-file-prompt-default)))
+
+(defun pi-coding-agent--read-session-file-name ()
+  "Read an existing pi session file name from the minibuffer."
+  (let* ((default-file (pi-coding-agent--session-file-prompt-default))
+         (default-dir (and default-file (file-name-directory default-file)))
+         (initial (and default-file (file-name-nondirectory default-file)))
+         ;; `read-file-name' otherwise uses the current buffer's visited file
+         ;; as a hidden default when DEFAULT-FILENAME and INITIAL are nil.
+         (buffer-file-name nil))
+    (read-file-name "Pi session file: "
+                    default-dir
+                    default-file
+                    t
+                    initial)))
+
 ;;;###autoload
 (defun pi-coding-agent (&optional session)
   "Start or switch to pi coding agent session in current project.
@@ -159,12 +213,28 @@ frame, keeps layout unchanged and focuses the input window."
       (let ((dir (pi-coding-agent--session-directory)))
         (setq chat-buf (pi-coding-agent--setup-session dir session))
         (setq input-buf (buffer-local-value 'pi-coding-agent--input-buffer chat-buf))))
-    ;; When both windows are already visible in current frame, just focus
-    ;; the session input window. Otherwise restore/show the session layout.
-    (if (and (get-buffer-window-list chat-buf nil)
-             (get-buffer-window-list input-buf nil))
-        (pi-coding-agent--focus-input-window chat-buf input-buf)
-      (pi-coding-agent--display-buffers chat-buf input-buf))))
+    (pi-coding-agent--show-session-buffers chat-buf input-buf)))
+
+;;;###autoload
+(defun pi-coding-agent-open-session-file (session-file)
+  "Open pi JSONL SESSION-FILE as a live session.
+This uses the normal chat/input UI and switches pi to SESSION-FILE; it is not a
+static viewer.  The session header must record a non-empty absolute cwd that
+names an existing directory.  Interactively, prompt for an existing file.  In
+Dired, default to the regular file at point; otherwise, default to the current
+visited local regular readable .jsonl file when there is one."
+  (interactive (list (pi-coding-agent--read-session-file-name)))
+  (let* ((session-file (expand-file-name session-file))
+         (dir (pi-coding-agent--session-file-cwd-or-error session-file)))
+    (pi-coding-agent--check-dependencies)
+    (let* ((chat-buf (pi-coding-agent--setup-session dir))
+           (input-buf (buffer-local-value 'pi-coding-agent--input-buffer
+                                          chat-buf))
+           (proc (buffer-local-value 'pi-coding-agent--process chat-buf)))
+      (pi-coding-agent--show-session-buffers chat-buf input-buf)
+      (when (pi-coding-agent--session-transition-ready-p chat-buf "open")
+        (pi-coding-agent--resume-selected-session proc chat-buf session-file))
+      chat-buf)))
 
 ;;;###autoload
 (defun pi-coding-agent-toggle ()
