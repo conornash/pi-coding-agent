@@ -1,5 +1,6 @@
 #+title: pi-coding-agent
 #+author: Daniel Nouri
+#+options: toc:nil num:nil
 
 #+html: <a href="https://melpa.org/#/pi-coding-agent"><img alt="MELPA" src="https://melpa.org/packages/pi-coding-agent-badge.svg"/></a>
 #+html: <a href="https://github.com/dnouri/pi-coding-agent/actions/workflows/test-unit.yml"><img alt="Unit Tests" src="https://github.com/dnouri/pi-coding-agent/actions/workflows/test-unit.yml/badge.svg"/></a>
@@ -8,7 +9,16 @@
 #+html: <a href="https://github.com/dnouri/pi-coding-agent/actions/workflows/nightly.yml"><img alt="Nightly" src="https://github.com/dnouri/pi-coding-agent/actions/workflows/nightly.yml/badge.svg"/></a>
 #+html: <a href="https://github.com/dnouri/pi-coding-agent/actions/workflows/melpazoid.yml"><img alt="melpazoid" src="https://github.com/dnouri/pi-coding-agent/actions/workflows/melpazoid.yml/badge.svg"/></a>
 
-* What is pi-coding-agent for Emacs?
+#+html: <p><em>Jump to:</em> <a href="#quick-start">Quick start</a> ·
+#+html: <a href="#everyday-workflow">Everyday workflow</a>
+#+html: (<a href="#composing-prompts">composing prompts</a>,
+#+html: <a href="#reading-output">reading output</a>,
+#+html: <a href="#sessions-and-context">sessions</a>,
+#+html: <a href="#common-keys">shortcuts</a>) ·
+#+html: <a href="#advanced-features-and-configuration">Advanced</a> ·
+#+html: <a href="#development">Development</a></p>
+
+* What is pi-coding-agent for Emacs? 🦬
 
 =pi-coding-agent= is an Emacs frontend for [[https://pi.dev][Pi]].  The Pi CLI still runs
 the agent, talks to models, and executes tools.  This package wraps Pi
@@ -24,12 +34,13 @@ you already have.
 
 #+html: <a href="https://danielnouri.org/media/pi-coding-agent-demo.mp4"><img src="https://danielnouri.org/media/pi-coding-agent-preview.gif" alt="pi-coding-agent demo - click to play" width="600" height="600"></a>
 
-* Quick start
+#+html: <a id="quick-start"></a>
+* Quick start 🚀
 
 If you already have Emacs 29.1 or later with tree-sitter support, this
 is the shortest path to a usable session.
 
-** Requirements
+** Requirements ✅
 
 - Emacs 29.1 or later, built with tree-sitter support
 - Node.js 22.19 or later for the pi CLI
@@ -39,7 +50,7 @@ is the shortest path to a usable session.
   configured for pi
 - A C compiler if Emacs needs to compile tree-sitter grammars
 
-** Install pi and authenticate
+** Install pi and authenticate 🔐
 
 #+begin_src bash
 # Install the pi CLI
@@ -55,7 +66,7 @@ pi --login
 If you prefer not to use OAuth, configure the provider API keys
 supported by Pi instead.
 
-** Install the Emacs package
+** Install the Emacs package 📦
 
 Install from [[https://melpa.org/#/pi-coding-agent][MELPA]]:
 
@@ -83,7 +94,7 @@ You may also define a shorter command name:
 After that, =M-x pi= starts or focuses the current project's pi
 session.
 
-** Troubleshooting and first-run notes
+** Troubleshooting and first-run notes 🩺
 
 *** No model is available
 
@@ -145,7 +156,8 @@ If the menu complains about =transient=, set
 =package-install-upgrade-built-in= to =t=, install or upgrade
 =transient= from MELPA, and restart Emacs.
 
-* Everyday workflow
+#+html: <a id="everyday-workflow"></a>
+* Everyday workflow 🧭
 
 Start a session with =M-x pi-coding-agent=.  =pi-coding-agent= opens
 two windows:
@@ -172,7 +184,8 @@ conveniently discover commands and shortcuts for model selection,
 thinking level, sessions, fork, compact, export, stats, skills and
 custom commands.
 
-** Composing prompts
+#+html: <a id="composing-prompts"></a>
+** Composing prompts ✍️
 
 The input buffer is intentionally boring Emacs.  Write multi-line
 prompts, paste from other buffers, use the kill ring, keyboard macros,
@@ -194,7 +207,8 @@ the linked chat window (also known as =M-<next>= and =M-<prior>=).  If
 your terminal does not send those keys, =C-M-v= and =C-M-S-v= are the
 traditional Emacs fallbacks.
 
-** Reading output
+#+html: <a id="reading-output"></a>
+** Reading output 📖
 
 The chat buffer is rendered as Markdown and uses tree-sitter for
 syntax highlighting code blocks and diffs.  Long tool output is
@@ -217,7 +231,8 @@ Press =TAB= on a turn header (=You= or =Assistant=) to fold or unfold
 that turn.  Use =n= and =p= in the chat buffer to jump between user
 messages, and =f= to fork the conversation from the turn at point.
 
-** Sessions and context
+#+html: <a id="sessions-and-context"></a>
+** Sessions and context 🗂️
 
 Each project directory gets its own session automatically.  Running
 =M-x pi-coding-agent= again from a Pi buffer restores missing panes;
@@ -233,32 +248,35 @@ can also compact automatically when needed.  The header line shows
 context usage and changes face when it crosses the configured warning
 and error thresholds.
 
-** Common keys
+#+html: <a id="common-keys"></a>
+** Common keys ⌨️
 
-| Key              | Context | Description                                |
-|------------------+---------+--------------------------------------------|
-| =C-c C-c=        | input   | Send prompt, or queue follow-up if busy    |
-| =C-c C-s=        | input   | Send steering message while Pi is busy     |
-| =C-c C-k=        | input   | Abort streaming                            |
-| =C-c C-p=        | input   | Open transient menu                        |
-| =C-c C-r=        | input   | Resume a previous session                  |
-| =M-p= / =M-n=    | input   | Prompt history (=C-↑= / =C-↓= also work)   |
-| =C-r=            | input   | Incremental prompt-history search          |
-| =TAB=            | input   | Complete paths, and =/= commands           |
-| =M+<prior/next>= | input   | Scroll linked chat window                  |
-| =TAB=            | chat    | Toggle thinking block, tool block, or turn |
-| =RET=            | chat    | Visit file at point from tool output       |
-| =n= / =p=        | chat    | Navigate user messages                     |
-| =f=              | chat    | Fork from the turn at point                |
-| =q=              | chat    | Quit session                               |
 
-* Advanced features and configuration
+| Key              | Context | Description                                    |
+|------------------+---------+------------------------------------------------|
+| =C-c C-c=        | input   | 📮 Send prompt, or queue follow-up if busy    |
+| =C-c C-s=        | input   | 🐎 Send steering message while Pi is busy     |
+| =C-c C-k=        | input   | 🪓 Abort streaming                            |
+| =C-c C-p=        | input   | 🎛️ Open transient menu                        |
+| =C-c C-r=        | input   | 📼 Resume a previous session                  |
+| =M-p= / =M-n=    | input   | 🕰️ Prompt history (=C-↑= / =C-↓= also work)   |
+| =C-r=            | input   | 🕵️ Incremental prompt-history search          |
+| =TAB=            | input   | 🪄 Complete paths, and =/= commands           |
+| =M+<prior/next>= | input   | 🛗 Scroll linked chat window                  |
+| =TAB=            | chat    | 🪗 Toggle thinking block, tool block, or turn |
+| =RET=            | chat    | 🎯 Visit file at point from tool output       |
+| =n= / =p=        | chat    | 🐾 Navigate user messages                     |
+| =f=              | chat    | 🌿 Fork from the turn at point                |
+| =q=              | chat    | 👋 Quit session                               |
+
+#+html: <a id="advanced-features-and-configuration"></a>
+* Advanced features and configuration ⚙️
 
 This section is for more advanced usage, including changing defaults,
 managing grammars yourself, using extension features, or integrating
 =pi-coding-agent= into the rest of your Emacs setup.
 
-** Configuration
+** Configuration 🎛️
 
 Here's some common non-default preferences:
 
@@ -307,7 +325,7 @@ You can also inspect the whole customization group with:
 M-x customize-group RET pi-coding-agent RET
 #+end_src
 
-** Display of thinking
+** Display of thinking 💭
 
 New chat buffers inherit =pi-coding-agent-thinking-display=.  The
 default is =visible=: live thinking streams while the assistant is
@@ -320,7 +338,7 @@ customize-option=.
 
 Press =TAB= inside completed thinking to toggle that block locally.
 
-** Markdown tables
+** Markdown tables 🧮
 
 Pipe tables in the chat buffer are beautified as a display-only view.
 Recent tables re-wrap automatically when the chat window width
@@ -331,7 +349,7 @@ highlighting, keeping long sessions snappy.  Customize
 =pi-coding-agent-hot-tail-turn-count= to choose how many recent
 =You=/=Assistant= turns stay live.
 
-** Sessions, transcripts, and exports
+** Sessions, transcripts, and exports 🗃️
 
 To open an existing Pi JSONL session file directly, run:
 
@@ -349,7 +367,7 @@ transcript on disk.  Saving does not interrupt or replace the live Pi
 session.  For a shareable export, use HTML export from the menu (=C-c
 C-p e=) or run =/export=.
 
-** Extension support
+** Extension support 🧩
 
 The =pi-coding-agent= Emacs frontend has basic support for Pi
 extensions.  Extension commands show up in slash completion and the
@@ -364,7 +382,7 @@ status text in the header line to see the exact =statusKey=, which you
 can use to change the font for that extension's status text using
 =pi-coding-agent-extension-status-faces=.
 
-** Tree-sitter grammar management
+** Tree-sitter grammar management 🌳
 
 =pi-coding-agent= uses Emacs's built-in tree-sitter support to render
 Markdown and highlight code blocks in the chat and input buffers.  The
@@ -396,7 +414,7 @@ essential grammar prompt:
 (setopt pi-coding-agent-essential-grammar-action 'warn)
 #+end_src
 
-** Activity phase hooks
+** Activity phase hooks 🪝
 
 For custom UI changes tied to activity, add functions to
 =pi-coding-agent-activity-phase-functions=.  Each function receives:
@@ -472,7 +490,7 @@ Track busy sessions for your own mode-line or tab display:
           #'my-pi-track-busy-sessions)
 #+end_src
 
-** Installation details
+** Installation details 🧱
 
 MELPA installs =transient=, =md-ts-mode=, and =markdown-table-wrap=
 automatically.  =pi-coding-agent= uses =md-ts-mode= only for its own
@@ -547,12 +565,13 @@ If you prefer not to install the Pi CLI globally, customize
       '("npx" "-y" "@earendil-works/pi-coding-agent@0.79.1"))
 #+end_src
 
-* Development
+#+html: <a id="development"></a>
+* Development 🛠️
 
 Most users can skip this section.  It is for contributors and local
 package development.
 
-** Running tests locally
+** Running tests locally 🧪
 
 The shared integration tests have two lanes:
 
@@ -591,7 +610,7 @@ make test-gui SELECTOR=tool-overlay-bounded
 make test-all
 #+end_src
 
-** Running fake-pi manually
+** Running fake-pi manually 🎭
 
 Run the harness directly when debugging the subprocess contract
 itself.  These commands start an interactive JSONL peer on
@@ -607,7 +626,7 @@ uv run --script test/support/fake_pi.py --scenario prompt-lifecycle
 
 Scenario fixtures live under =test/fixtures/fake-pi/=.
 
-** GUI tests with visible window
+** GUI tests with visible window 🖼️
 
 The GUI suite is deterministic and fake-backed.  By default it
 auto-detects whether to show a window or run headless.
@@ -623,7 +642,7 @@ auto-detects whether to show a window or run headless.
 ./test/run-gui-tests.sh --headless
 #+end_src
 
-** CI setup
+** CI setup 🚦
 
 GitHub Actions runs on every push:
 
@@ -636,10 +655,10 @@ The real integration workflows use Node 24.  Nightly builds keep real
 integration coverage against the pinned pi version (from Makefile) and
 latest, while the fake-backed GUI suite runs once.
 
-* Links
+* Links 🔗
 
 - [[https://pi.dev][pi.dev]]: pi coding agent home page
 
-* License
+* License ⚖️
 
 GPL-3.0-or-later. See [[file:LICENSE][LICENSE]].
